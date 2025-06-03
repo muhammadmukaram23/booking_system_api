@@ -15,7 +15,6 @@ from schemas.booking_schemas import (
     BookingParticipantCreate, BookingParticipantUpdate, BookingParticipantResponse,
     BookingHistoryCreate, BookingHistoryResponse, BookingCancellation
 )
-from auth.auth import get_current_active_user, check_business_owner_permission, check_admin_permission
 
 router = APIRouter(
     prefix="/api/bookings",
@@ -71,7 +70,7 @@ def check_availability(
 @router.post("/", response_model=BookingResponse)
 def create_booking(
     booking: BookingCreate,
-    current_user: User = Depends(get_current_active_user),
+    user_id: int,
     db: Session = Depends(get_db)
 ):
     """Create a new booking"""
@@ -101,7 +100,7 @@ def create_booking(
     booking_reference = generate_booking_reference()
     db_booking = Booking(
         booking_reference=booking_reference,
-        user_id=current_user.user_id,
+        user_id=user_id,
         business_id=booking.business_id,
         service_id=booking.service_id,
         resource_id=booking.resource_id,
@@ -126,7 +125,7 @@ def create_booking(
     history = BookingHistory(
         booking_id=db_booking.booking_id,
         new_status="pending",
-        changed_by=current_user.user_id,
+        changed_by=user_id,
         change_reason="Booking created"
     )
     db.add(history)
@@ -141,16 +140,16 @@ def create_booking(
     db.commit()
     return db_booking
 
-@router.get("/my-bookings", response_model=List[BookingResponse])
-def read_my_bookings(
+@router.get("/user/{user_id}", response_model=List[BookingResponse])
+def read_user_bookings(
+    user_id: int,
     status: Optional[str] = None,
     from_date: Optional[date] = None,
     to_date: Optional[date] = None,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Get all bookings for current user"""
-    query = db.query(Booking).filter(Booking.user_id == current_user.user_id)
+    """Get all bookings for a user"""
+    query = db.query(Booking).filter(Booking.user_id == user_id)
     
     if status:
         query = query.filter(Booking.status == status)
@@ -173,13 +172,9 @@ def read_business_bookings(
     status: Optional[str] = None,
     from_date: Optional[date] = None,
     to_date: Optional[date] = None,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Get all bookings for a business"""
-    # Check if user is owner of the business
-    check_business_owner_permission(business_id, current_user)
-    
     query = db.query(Booking).filter(Booking.business_id == business_id)
     
     if status:
@@ -200,7 +195,6 @@ def read_business_bookings(
 @router.get("/{booking_id}", response_model=BookingDetailResponse)
 def read_booking(
     booking_id: int,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Get a specific booking with details"""
@@ -208,21 +202,13 @@ def read_booking(
     if db_booking is None:
         raise HTTPException(status_code=404, detail="Booking not found")
     
-    # Check if user is authorized to view this booking
-    is_owner = db_booking.user_id == current_user.user_id
-    is_business_owner = any(business.business_id == db_booking.business_id for business in current_user.businesses)
-    is_admin = any(role.role.role_name == "admin" for role in current_user.user_roles)
-    
-    if not (is_owner or is_business_owner or is_admin):
-        raise HTTPException(status_code=403, detail="Not authorized to view this booking")
-    
     return db_booking
 
 @router.put("/{booking_id}", response_model=BookingResponse)
 def update_booking(
     booking_id: int,
     booking_update: BookingUpdate,
-    current_user: User = Depends(get_current_active_user),
+    user_id: int,
     db: Session = Depends(get_db)
 ):
     """Update a booking"""
@@ -230,61 +216,47 @@ def update_booking(
     if db_booking is None:
         raise HTTPException(status_code=404, detail="Booking not found")
     
-    # Check if user is authorized to update this booking
-    is_owner = db_booking.user_id == current_user.user_id
-    is_business_owner = any(business.business_id == db_booking.business_id for business in current_user.businesses)
-    is_admin = any(role.role.role_name == "admin" for role in current_user.user_roles)
-    
-    if not (is_owner or is_business_owner or is_admin):
-        raise HTTPException(status_code=403, detail="Not authorized to update this booking")
-    
-    # Check if booking can be updated
-    if db_booking.status in ["completed", "cancelled", "no_show"]:
-        raise HTTPException(status_code=400, detail=f"Cannot update a booking with status: {db_booking.status}")
-    
+    # Update booking fields
     update_data = booking_update.dict(exclude_unset=True)
     
     # Handle date and time changes
     if "booking_date" in update_data or "start_time" in update_data or "end_time" in update_data:
-        new_booking_date = update_data.get("booking_date", db_booking.booking_date)
-        new_start_time = update_data.get("start_time", db_booking.start_time)
-        new_end_time = update_data.get("end_time", db_booking.end_time)
+        booking_date = update_data.get("booking_date", db_booking.booking_date)
+        start_time = update_data.get("start_time", db_booking.start_time)
+        end_time = update_data.get("end_time", db_booking.end_time)
         
-        new_start_datetime = datetime.combine(new_booking_date, new_start_time)
-        new_end_datetime = datetime.combine(new_booking_date, new_end_time)
+        start_datetime = datetime.combine(booking_date, start_time)
+        end_datetime = datetime.combine(booking_date, end_time)
         
         # If end time is earlier than start time, assume it's the next day
-        if new_end_datetime <= new_start_datetime:
-            new_end_datetime += timedelta(days=1)
+        if end_datetime <= start_datetime:
+            end_datetime += timedelta(days=1)
         
-        # Check availability for the new time
+        # Check availability
         is_available, message = check_availability(
             db, db_booking.service_id, db_booking.resource_id, 
-            new_start_datetime, new_end_datetime, 
-            update_data.get("participants", db_booking.participants)
+            start_datetime, end_datetime, db_booking.participants
         )
         
         if not is_available:
             raise HTTPException(status_code=400, detail=message)
         
-        update_data["start_datetime"] = new_start_datetime
-        update_data["end_datetime"] = new_end_datetime
+        update_data["start_datetime"] = start_datetime
+        update_data["end_datetime"] = end_datetime
     
-    # Handle status changes
-    old_status = db_booking.status
-    if "status" in update_data and update_data["status"] != old_status:
-        # Log status change in history
-        history = BookingHistory(
-            booking_id=booking_id,
-            old_status=old_status,
-            new_status=update_data["status"],
-            changed_by=current_user.user_id,
-            change_reason="Status updated"
-        )
-        db.add(history)
-    
+    # Apply updates
     for key, value in update_data.items():
         setattr(db_booking, key, value)
+    
+    # Log status change if applicable
+    if "status" in update_data and update_data["status"] != db_booking.status:
+        history = BookingHistory(
+            booking_id=booking_id,
+            new_status=update_data["status"],
+            changed_by=user_id,
+            change_reason=booking_update.change_reason or "Status updated"
+        )
+        db.add(history)
     
     db.commit()
     db.refresh(db_booking)
@@ -294,7 +266,7 @@ def update_booking(
 def cancel_booking(
     booking_id: int,
     cancellation: BookingCancellation,
-    current_user: User = Depends(get_current_active_user),
+    user_id: int,
     db: Session = Depends(get_db)
 ):
     """Cancel a booking"""
@@ -302,32 +274,20 @@ def cancel_booking(
     if db_booking is None:
         raise HTTPException(status_code=404, detail="Booking not found")
     
-    # Check if user is authorized to cancel this booking
-    is_owner = db_booking.user_id == current_user.user_id
-    is_business_owner = any(business.business_id == db_booking.business_id for business in current_user.businesses)
-    is_admin = any(role.role.role_name == "admin" for role in current_user.user_roles)
-    
-    if not (is_owner or is_business_owner or is_admin):
-        raise HTTPException(status_code=403, detail="Not authorized to cancel this booking")
-    
     # Check if booking can be cancelled
-    if db_booking.status in ["completed", "cancelled", "no_show"]:
-        raise HTTPException(status_code=400, detail=f"Cannot cancel a booking with status: {db_booking.status}")
+    if db_booking.status in ["cancelled", "completed", "no_show"]:
+        raise HTTPException(status_code=400, detail=f"Cannot cancel a booking with status '{db_booking.status}'")
     
-    # Update booking
-    old_status = db_booking.status
+    # Update booking status
     db_booking.status = "cancelled"
-    db_booking.cancelled_at = datetime.now()
-    db_booking.cancelled_by = current_user.user_id
     db_booking.cancellation_reason = cancellation.cancellation_reason
     
-    # Log status change in history
+    # Log cancellation in history
     history = BookingHistory(
         booking_id=booking_id,
-        old_status=old_status,
         new_status="cancelled",
-        changed_by=current_user.user_id,
-        change_reason=cancellation.cancellation_reason
+        changed_by=user_id,
+        change_reason=cancellation.cancellation_reason or "Booking cancelled"
     )
     db.add(history)
     
@@ -336,34 +296,24 @@ def cancel_booking(
         slot = db.query(AvailabilitySlot).filter(AvailabilitySlot.slot_id == db_booking.slot_id).first()
         if slot:
             slot.booked_spots -= db_booking.participants
-            if slot.booked_spots < 0:
-                slot.booked_spots = 0
+            db.commit()
     
     db.commit()
     db.refresh(db_booking)
     return db_booking
 
-# Booking participant endpoints
+# Booking participants endpoints
 @router.post("/participants", response_model=BookingParticipantResponse)
 def create_booking_participant(
     participant: BookingParticipantCreate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Add a participant to a booking"""
-    # Check if booking exists and belongs to user
-    db_booking = db.query(Booking).filter(Booking.booking_id == participant.booking_id).first()
-    if db_booking is None:
+    """Create a new booking participant"""
+    # Check if booking exists
+    booking = db.query(Booking).filter(Booking.booking_id == participant.booking_id).first()
+    if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
     
-    if db_booking.user_id != current_user.user_id:
-        raise HTTPException(status_code=403, detail="Not authorized to add participants to this booking")
-    
-    # Check if booking can be modified
-    if db_booking.status in ["completed", "cancelled", "no_show"]:
-        raise HTTPException(status_code=400, detail=f"Cannot modify a booking with status: {db_booking.status}")
-    
-    # Create participant
     db_participant = BookingParticipant(**participant.dict())
     db.add(db_participant)
     db.commit()
@@ -373,22 +323,12 @@ def create_booking_participant(
 @router.get("/participants/{booking_id}", response_model=List[BookingParticipantResponse])
 def read_booking_participants(
     booking_id: int,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Get all participants for a booking"""
-    # Check if booking exists
-    db_booking = db.query(Booking).filter(Booking.booking_id == booking_id).first()
-    if db_booking is None:
+    booking = db.query(Booking).filter(Booking.booking_id == booking_id).first()
+    if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
-    
-    # Check if user is authorized to view participants
-    is_owner = db_booking.user_id == current_user.user_id
-    is_business_owner = any(business.business_id == db_booking.business_id for business in current_user.businesses)
-    is_admin = any(role.role.role_name == "admin" for role in current_user.user_roles)
-    
-    if not (is_owner or is_business_owner or is_admin):
-        raise HTTPException(status_code=403, detail="Not authorized to view participants for this booking")
     
     participants = db.query(BookingParticipant).filter(BookingParticipant.booking_id == booking_id).all()
     return participants
@@ -397,23 +337,12 @@ def read_booking_participants(
 def update_booking_participant(
     participant_id: int,
     participant_update: BookingParticipantUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Update a booking participant"""
-    # Get participant with booking
     db_participant = db.query(BookingParticipant).filter(BookingParticipant.participant_id == participant_id).first()
     if db_participant is None:
         raise HTTPException(status_code=404, detail="Participant not found")
-    
-    # Check if booking belongs to user
-    db_booking = db.query(Booking).filter(Booking.booking_id == db_participant.booking_id).first()
-    if db_booking.user_id != current_user.user_id:
-        raise HTTPException(status_code=403, detail="Not authorized to update participants for this booking")
-    
-    # Check if booking can be modified
-    if db_booking.status in ["completed", "cancelled", "no_show"]:
-        raise HTTPException(status_code=400, detail=f"Cannot modify a booking with status: {db_booking.status}")
     
     update_data = participant_update.dict(exclude_unset=True)
     for key, value in update_data.items():
@@ -426,23 +355,12 @@ def update_booking_participant(
 @router.delete("/participants/{participant_id}")
 def delete_booking_participant(
     participant_id: int,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Delete a booking participant"""
-    # Get participant with booking
     db_participant = db.query(BookingParticipant).filter(BookingParticipant.participant_id == participant_id).first()
     if db_participant is None:
         raise HTTPException(status_code=404, detail="Participant not found")
-    
-    # Check if booking belongs to user
-    db_booking = db.query(Booking).filter(Booking.booking_id == db_participant.booking_id).first()
-    if db_booking.user_id != current_user.user_id:
-        raise HTTPException(status_code=403, detail="Not authorized to delete participants for this booking")
-    
-    # Check if booking can be modified
-    if db_booking.status in ["completed", "cancelled", "no_show"]:
-        raise HTTPException(status_code=400, detail=f"Cannot modify a booking with status: {db_booking.status}")
     
     db.delete(db_participant)
     db.commit()

@@ -9,7 +9,6 @@ from schemas.review_schemas import (
     ReviewBase, ReviewResponse, ReviewResponseBase, 
     ReviewResponseResponse, ReviewStatusEnum
 )
-from auth.auth import get_current_user, get_current_active_user, check_business_owner_permission
 
 router = APIRouter(
     prefix="/api/reviews",
@@ -21,14 +20,14 @@ router = APIRouter(
 @router.post("/", response_model=ReviewResponse)
 def create_review(
     review: ReviewBase,
-    current_user: User = Depends(get_current_active_user),
+    user_id: int,
     db: Session = Depends(get_db)
 ):
     """Create a new review for a booking"""
     # Verify the booking exists and belongs to the user
     booking = db.query(Booking).filter(
         Booking.booking_id == review.booking_id,
-        Booking.user_id == current_user.user_id
+        Booking.user_id == user_id
     ).first()
     
     if not booking:
@@ -41,7 +40,7 @@ def create_review(
     # Check if user already reviewed this booking
     existing_review = db.query(Review).filter(
         Review.booking_id == review.booking_id,
-        Review.user_id == current_user.user_id
+        Review.user_id == user_id
     ).first()
     
     if existing_review:
@@ -50,7 +49,7 @@ def create_review(
     # Create the review
     db_review = Review(
         booking_id=review.booking_id,
-        user_id=current_user.user_id,
+        user_id=user_id,
         business_id=review.business_id,
         service_id=review.service_id,
         rating=review.rating,
@@ -138,17 +137,17 @@ def get_service_reviews(
     reviews = query.offset(skip).limit(limit).all()
     return reviews
 
-# Get all reviews by current user
-@router.get("/my-reviews", response_model=List[ReviewResponse])
+# Get all reviews by user
+@router.get("/user/{user_id}", response_model=List[ReviewResponse])
 def get_user_reviews(
+    user_id: int,
     skip: int = 0,
     limit: int = 100,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Get all reviews by the current user"""
+    """Get all reviews by a user"""
     reviews = db.query(Review).filter(
-        Review.user_id == current_user.user_id
+        Review.user_id == user_id
     ).order_by(Review.created_at.desc()).offset(skip).limit(limit).all()
     
     return reviews
@@ -164,7 +163,7 @@ def get_review(
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
     
-    # Only show approved reviews to general public unless it's admin or business owner
+    # Only show approved reviews to general public
     if review.status != "approved":
         raise HTTPException(status_code=404, detail="Review not found")
     
@@ -175,13 +174,13 @@ def get_review(
 def update_review(
     review_id: int,
     review_update: ReviewBase,
-    current_user: User = Depends(get_current_active_user),
+    user_id: int,
     db: Session = Depends(get_db)
 ):
-    """Update a review by the current user"""
+    """Update a review by the user"""
     db_review = db.query(Review).filter(
         Review.review_id == review_id,
-        Review.user_id == current_user.user_id
+        Review.user_id == user_id
     ).first()
     
     if not db_review:
@@ -208,13 +207,13 @@ def update_review(
 @router.delete("/{review_id}")
 def delete_review(
     review_id: int,
-    current_user: User = Depends(get_current_active_user),
+    user_id: int,
     db: Session = Depends(get_db)
 ):
-    """Delete a review by the current user"""
+    """Delete a review by the user"""
     db_review = db.query(Review).filter(
         Review.review_id == review_id,
-        Review.user_id == current_user.user_id
+        Review.user_id == user_id
     ).first()
     
     if not db_review:
@@ -232,17 +231,16 @@ def delete_review(
 
 # Business owner endpoints for reviews
 
-# Get all reviews for a business (including pending/rejected) for business owner
+# Get all reviews for a business (including pending/rejected)
 @router.get("/business/{business_id}/all", response_model=List[ReviewResponse])
 def get_all_business_reviews(
     business_id: int,
     skip: int = 0,
     limit: int = 100,
     status: Optional[ReviewStatusEnum] = None,
-    current_user: User = Depends(check_business_owner_permission),
     db: Session = Depends(get_db)
 ):
-    """Get all reviews for a business (for business owner)"""
+    """Get all reviews for a business"""
     # Query reviews
     query = db.query(Review).filter(Review.business_id == business_id)
     
@@ -261,17 +259,13 @@ def get_all_business_reviews(
 def update_review_status(
     review_id: int,
     status: ReviewStatusEnum,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Update review status (for business owner)"""
+    """Update review status"""
     # Get the review
     review = db.query(Review).filter(Review.review_id == review_id).first()
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
-    
-    # Check if current user is the business owner
-    check_business_owner_permission(review.business_id, current_user)
     
     # Update status
     review.status = status
@@ -286,17 +280,14 @@ def update_review_status(
 @router.post("/response", response_model=ReviewResponseResponse)
 def create_review_response(
     response: ReviewResponseBase,
-    current_user: User = Depends(get_current_active_user),
+    user_id: int,
     db: Session = Depends(get_db)
 ):
-    """Create a response to a review (for business owner)"""
+    """Create a response to a review"""
     # Check if review exists
     review = db.query(Review).filter(Review.review_id == response.review_id).first()
     if not review:
         raise HTTPException(status_code=404, detail="Review not found")
-    
-    # Check if current user is the business owner
-    check_business_owner_permission(response.business_id, current_user)
     
     # Check if response already exists
     existing_response = db.query(ReviewResponseModel).filter(
@@ -311,7 +302,7 @@ def create_review_response(
         review_id=response.review_id,
         business_id=response.business_id,
         response_text=response.response_text,
-        responded_by=current_user.user_id
+        responded_by=user_id
     )
     
     db.add(db_response)
@@ -325,17 +316,18 @@ def create_review_response(
 def update_review_response(
     response_id: int,
     response_update: ReviewResponseBase,
-    current_user: User = Depends(get_current_active_user),
+    user_id: int,
     db: Session = Depends(get_db)
 ):
-    """Update a response to a review (for business owner)"""
+    """Update a response to a review"""
     # Get the response
     db_response = db.query(ReviewResponseModel).filter(ReviewResponseModel.response_id == response_id).first()
     if not db_response:
         raise HTTPException(status_code=404, detail="Response not found")
     
-    # Check if current user is the business owner
-    check_business_owner_permission(db_response.business_id, current_user)
+    # Check if user is the one who responded
+    if db_response.responded_by != user_id:
+        raise HTTPException(status_code=403, detail="You can only update your own responses")
     
     # Update response
     db_response.response_text = response_update.response_text
@@ -350,17 +342,18 @@ def update_review_response(
 @router.delete("/response/{response_id}")
 def delete_review_response(
     response_id: int,
-    current_user: User = Depends(get_current_active_user),
+    user_id: int,
     db: Session = Depends(get_db)
 ):
-    """Delete a response to a review (for business owner)"""
+    """Delete a response to a review"""
     # Get the response
     db_response = db.query(ReviewResponseModel).filter(ReviewResponseModel.response_id == response_id).first()
     if not db_response:
         raise HTTPException(status_code=404, detail="Response not found")
     
-    # Check if current user is the business owner
-    check_business_owner_permission(db_response.business_id, current_user)
+    # Check if user is the one who responded
+    if db_response.responded_by != user_id:
+        raise HTTPException(status_code=403, detail="You can only delete your own responses")
     
     db.delete(db_response)
     db.commit()

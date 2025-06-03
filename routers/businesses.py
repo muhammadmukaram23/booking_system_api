@@ -10,7 +10,6 @@ from schemas.business_schemas import (
     BusinessAddressCreate, BusinessAddressUpdate, BusinessAddressResponse,
     BusinessHoursCreate, BusinessHoursUpdate, BusinessHoursResponse
 )
-from auth.auth import get_current_active_user, check_business_owner_permission, check_admin_permission
 
 router = APIRouter(
     prefix="/api/businesses",
@@ -22,12 +21,12 @@ router = APIRouter(
 @router.post("/", response_model=BusinessResponse)
 def create_business(
     business: BusinessCreate,
-    current_user: User = Depends(get_current_active_user),
+    user_id: int,
     db: Session = Depends(get_db)
 ):
     """Create a new business"""
     db_business = Business(
-        owner_id=current_user.user_id,
+        owner_id=user_id,
         **business.dict()
     )
     
@@ -73,13 +72,16 @@ def read_businesses(
     businesses = query.offset(skip).limit(limit).all()
     return businesses
 
-@router.get("/my-businesses", response_model=List[BusinessResponse])
-def read_my_businesses(
-    current_user: User = Depends(get_current_active_user),
+@router.get("/user/{user_id}", response_model=List[BusinessResponse])
+def read_user_businesses(
+    user_id: int,
     db: Session = Depends(get_db)
 ):
-    """Get all businesses owned by current user"""
-    return current_user.businesses
+    """Get all businesses owned by a user"""
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user.businesses
 
 @router.get("/{business_id}", response_model=BusinessWithDetails)
 def read_business(
@@ -97,26 +99,14 @@ def read_business(
 def update_business(
     business_id: int,
     business_update: BusinessUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Update a business"""
-    # Check if user is owner or admin
-    is_admin = any(role.role.role_name == "admin" for role in current_user.user_roles)
-    is_owner = any(business.business_id == business_id for business in current_user.businesses)
-    
-    if not (is_admin or is_owner):
-        raise HTTPException(status_code=403, detail="Not authorized to update this business")
-    
     db_business = db.query(Business).filter(Business.business_id == business_id).first()
     if db_business is None:
         raise HTTPException(status_code=404, detail="Business not found")
     
-    # Only allow admins to update featured and status fields
     update_data = business_update.dict(exclude_unset=True)
-    if not is_admin:
-        update_data.pop("featured", None)
-        update_data.pop("status", None)
     
     for key, value in update_data.items():
         setattr(db_business, key, value)
@@ -130,12 +120,13 @@ def update_business(
 def create_business_address(
     business_id: int,
     address: BusinessAddressCreate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Create a new address for a business"""
-    # Check if user is owner
-    check_business_owner_permission(business_id, current_user)
+    # Check if business exists
+    business = db.query(Business).filter(Business.business_id == business_id).first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
     
     db_address = BusinessAddress(
         business_id=business_id,
@@ -143,7 +134,6 @@ def create_business_address(
     )
     
     # If this is the first address or set as primary, make it the primary
-    business = db.query(Business).filter(Business.business_id == business_id).first()
     if address.is_primary or len(business.addresses) == 0:
         # Reset all other addresses to non-primary
         for addr in business.addresses:
@@ -172,13 +162,9 @@ def update_business_address(
     business_id: int,
     address_id: int,
     address_update: BusinessAddressUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Update a business address"""
-    # Check if user is owner
-    check_business_owner_permission(business_id, current_user)
-    
     db_address = db.query(BusinessAddress).filter(
         BusinessAddress.address_id == address_id,
         BusinessAddress.business_id == business_id
@@ -207,13 +193,9 @@ def update_business_address(
 def delete_business_address(
     business_id: int,
     address_id: int,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Delete a business address"""
-    # Check if user is owner
-    check_business_owner_permission(business_id, current_user)
-    
     db_address = db.query(BusinessAddress).filter(
         BusinessAddress.address_id == address_id,
         BusinessAddress.business_id == business_id
@@ -244,12 +226,13 @@ def delete_business_address(
 def create_business_hours(
     business_id: int,
     hours: BusinessHoursCreate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Create or update business hours for a specific day"""
-    # Check if user is owner
-    check_business_owner_permission(business_id, current_user)
+    # Check if business exists
+    business = db.query(Business).filter(Business.business_id == business_id).first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
     
     # Check if hours for this day already exist
     existing_hours = db.query(BusinessHours).filter(
@@ -261,7 +244,7 @@ def create_business_hours(
         # Update existing hours
         existing_hours.open_time = hours.open_time
         existing_hours.close_time = hours.close_time
-        existing_hours.is_open = hours.is_open
+        existing_hours.is_closed = hours.is_closed
         db.commit()
         db.refresh(existing_hours)
         return existing_hours
@@ -293,20 +276,16 @@ def update_business_hours(
     business_id: int,
     day_of_week: str,
     hours_update: BusinessHoursUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Update business hours for a specific day"""
-    # Check if user is owner
-    check_business_owner_permission(business_id, current_user)
-    
     db_hours = db.query(BusinessHours).filter(
         BusinessHours.business_id == business_id,
         BusinessHours.day_of_week == day_of_week
     ).first()
     
     if db_hours is None:
-        raise HTTPException(status_code=404, detail=f"Hours for {day_of_week} not found")
+        raise HTTPException(status_code=404, detail="Hours not found for this day")
     
     update_data = hours_update.dict(exclude_unset=True)
     for key, value in update_data.items():
@@ -314,4 +293,24 @@ def update_business_hours(
     
     db.commit()
     db.refresh(db_hours)
-    return db_hours 
+    return db_hours
+
+@router.delete("/{business_id}/hours/{day_of_week}")
+def delete_business_hours(
+    business_id: int,
+    day_of_week: str,
+    db: Session = Depends(get_db)
+):
+    """Delete business hours for a specific day"""
+    db_hours = db.query(BusinessHours).filter(
+        BusinessHours.business_id == business_id,
+        BusinessHours.day_of_week == day_of_week
+    ).first()
+    
+    if db_hours is None:
+        raise HTTPException(status_code=404, detail="Hours not found for this day")
+    
+    db.delete(db_hours)
+    db.commit()
+    
+    return {"message": "Hours deleted successfully"} 

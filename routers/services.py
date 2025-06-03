@@ -18,7 +18,6 @@ from schemas.service_schemas import (
     AvailabilitySlotCreate, AvailabilitySlotUpdate, AvailabilitySlotResponse,
     BlockedTimeCreate, BlockedTimeUpdate, BlockedTimeResponse
 )
-from auth.auth import get_current_active_user, check_business_owner_permission, check_admin_permission
 
 router = APIRouter(
     prefix="/api/services",
@@ -30,10 +29,9 @@ router = APIRouter(
 @router.post("/categories", response_model=CategoryResponse)
 def create_category(
     category: CategoryCreate,
-    current_user: User = Depends(check_admin_permission),
     db: Session = Depends(get_db)
 ):
-    """Create a new category (admin only)"""
+    """Create a new category"""
     db_category = Category(**category.dict())
     db.add(db_category)
     db.commit()
@@ -71,10 +69,9 @@ def read_category(
 def update_category(
     category_id: int,
     category_update: CategoryUpdate,
-    current_user: User = Depends(check_admin_permission),
     db: Session = Depends(get_db)
 ):
-    """Update a category (admin only)"""
+    """Update a category"""
     db_category = db.query(Category).filter(Category.category_id == category_id).first()
     if db_category is None:
         raise HTTPException(status_code=404, detail="Category not found")
@@ -91,12 +88,13 @@ def update_category(
 @router.post("/", response_model=ServiceResponse)
 def create_service(
     service: ServiceCreate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Create a new service"""
-    # Check if user is owner of the business
-    check_business_owner_permission(service.business_id, current_user)
+    # Check if business exists
+    business = db.query(Business).filter(Business.business_id == service.business_id).first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
     
     db_service = Service(**service.dict())
     db.add(db_service)
@@ -160,7 +158,6 @@ def read_service(
 def update_service(
     service_id: int,
     service_update: ServiceUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Update a service"""
@@ -168,9 +165,6 @@ def update_service(
     db_service = db.query(Service).filter(Service.service_id == service_id).first()
     if db_service is None:
         raise HTTPException(status_code=404, detail="Service not found")
-    
-    # Check if user is owner of the business
-    check_business_owner_permission(db_service.business_id, current_user)
     
     update_data = service_update.dict(exclude_unset=True)
     for key, value in update_data.items():
@@ -184,7 +178,6 @@ def update_service(
 @router.post("/pricing", response_model=ServicePricingResponse)
 def create_service_pricing(
     pricing: ServicePricingCreate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Create a new pricing tier for a service"""
@@ -192,9 +185,6 @@ def create_service_pricing(
     db_service = db.query(Service).filter(Service.service_id == pricing.service_id).first()
     if db_service is None:
         raise HTTPException(status_code=404, detail="Service not found")
-    
-    # Check if user is owner of the business
-    check_business_owner_permission(db_service.business_id, current_user)
     
     db_pricing = ServicePricing(**pricing.dict())
     db.add(db_pricing)
@@ -212,23 +202,19 @@ def read_service_pricing(
     if db_service is None:
         raise HTTPException(status_code=404, detail="Service not found")
     
-    return db_service.pricing_tiers
+    pricing = db.query(ServicePricing).filter(ServicePricing.service_id == service_id).all()
+    return pricing
 
 @router.put("/pricing/{pricing_id}", response_model=ServicePricingResponse)
 def update_service_pricing(
     pricing_id: int,
     pricing_update: ServicePricingUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Update a pricing tier"""
-    # Get the pricing with its service and business
     db_pricing = db.query(ServicePricing).filter(ServicePricing.pricing_id == pricing_id).first()
     if db_pricing is None:
         raise HTTPException(status_code=404, detail="Pricing tier not found")
-    
-    # Check if user is owner of the business
-    check_business_owner_permission(db_pricing.service.business_id, current_user)
     
     update_data = pricing_update.dict(exclude_unset=True)
     for key, value in update_data.items():
@@ -241,17 +227,12 @@ def update_service_pricing(
 @router.delete("/pricing/{pricing_id}")
 def delete_service_pricing(
     pricing_id: int,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Delete a pricing tier"""
-    # Get the pricing with its service and business
     db_pricing = db.query(ServicePricing).filter(ServicePricing.pricing_id == pricing_id).first()
     if db_pricing is None:
         raise HTTPException(status_code=404, detail="Pricing tier not found")
-    
-    # Check if user is owner of the business
-    check_business_owner_permission(db_pricing.service.business_id, current_user)
     
     db.delete(db_pricing)
     db.commit()
@@ -262,12 +243,13 @@ def delete_service_pricing(
 @router.post("/resources", response_model=ResourceResponse)
 def create_resource(
     resource: ResourceCreate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Create a new resource"""
-    # Check if user is owner of the business
-    check_business_owner_permission(resource.business_id, current_user)
+    # Check if business exists
+    business = db.query(Business).filter(Business.business_id == resource.business_id).first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
     
     db_resource = Resource(**resource.dict())
     db.add(db_resource)
@@ -314,17 +296,12 @@ def read_resource(
 def update_resource(
     resource_id: int,
     resource_update: ResourceUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Update a resource"""
-    # Get the resource with its business
     db_resource = db.query(Resource).filter(Resource.resource_id == resource_id).first()
     if db_resource is None:
         raise HTTPException(status_code=404, detail="Resource not found")
-    
-    # Check if user is owner of the business
-    check_business_owner_permission(db_resource.business_id, current_user)
     
     update_data = resource_update.dict(exclude_unset=True)
     for key, value in update_data.items():
@@ -338,21 +315,20 @@ def update_resource(
 @router.post("/availability/templates", response_model=AvailabilityTemplateResponse)
 def create_availability_template(
     template: AvailabilityTemplateCreate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Create a new availability template"""
-    # Check if user is owner of the business
+    # Check if service exists if provided
     if template.service_id:
         service = db.query(Service).filter(Service.service_id == template.service_id).first()
-        if service is None:
+        if not service:
             raise HTTPException(status_code=404, detail="Service not found")
-        check_business_owner_permission(service.business_id, current_user)
-    elif template.resource_id:
+    
+    # Check if resource exists if provided
+    if template.resource_id:
         resource = db.query(Resource).filter(Resource.resource_id == template.resource_id).first()
-        if resource is None:
+        if not resource:
             raise HTTPException(status_code=404, detail="Resource not found")
-        check_business_owner_permission(resource.business_id, current_user)
     
     db_template = AvailabilityTemplate(**template.dict())
     db.add(db_template)
@@ -390,19 +366,12 @@ def read_availability_templates(
 def update_availability_template(
     template_id: int,
     template_update: AvailabilityTemplateUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Update an availability template"""
     db_template = db.query(AvailabilityTemplate).filter(AvailabilityTemplate.template_id == template_id).first()
     if db_template is None:
         raise HTTPException(status_code=404, detail="Availability template not found")
-    
-    # Check if user is owner of the business
-    if db_template.service_id:
-        check_business_owner_permission(db_template.service.business_id, current_user)
-    elif db_template.resource_id:
-        check_business_owner_permission(db_template.resource.business_id, current_user)
     
     update_data = template_update.dict(exclude_unset=True)
     for key, value in update_data.items():
@@ -416,21 +385,20 @@ def update_availability_template(
 @router.post("/availability/slots", response_model=AvailabilitySlotResponse)
 def create_availability_slot(
     slot: AvailabilitySlotCreate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Create a new availability slot"""
-    # Check if user is owner of the business
+    # Check if service exists if provided
     if slot.service_id:
         service = db.query(Service).filter(Service.service_id == slot.service_id).first()
-        if service is None:
+        if not service:
             raise HTTPException(status_code=404, detail="Service not found")
-        check_business_owner_permission(service.business_id, current_user)
-    elif slot.resource_id:
+    
+    # Check if resource exists if provided
+    if slot.resource_id:
         resource = db.query(Resource).filter(Resource.resource_id == slot.resource_id).first()
-        if resource is None:
+        if not resource:
             raise HTTPException(status_code=404, detail="Resource not found")
-        check_business_owner_permission(resource.business_id, current_user)
     
     db_slot = AvailabilitySlot(**slot.dict())
     db.add(db_slot)
@@ -456,14 +424,14 @@ def read_availability_slots(
     if resource_id:
         query = query.filter(AvailabilitySlot.resource_id == resource_id)
     
-    if status:
-        query = query.filter(AvailabilitySlot.status == status)
-    
     if start_date:
         query = query.filter(AvailabilitySlot.start_datetime >= start_date)
     
     if end_date:
         query = query.filter(AvailabilitySlot.end_datetime <= end_date)
+    
+    if status:
+        query = query.filter(AvailabilitySlot.status == status)
     
     # Order by start time
     query = query.order_by(AvailabilitySlot.start_datetime)
@@ -475,19 +443,12 @@ def read_availability_slots(
 def update_availability_slot(
     slot_id: int,
     slot_update: AvailabilitySlotUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Update an availability slot"""
     db_slot = db.query(AvailabilitySlot).filter(AvailabilitySlot.slot_id == slot_id).first()
     if db_slot is None:
         raise HTTPException(status_code=404, detail="Availability slot not found")
-    
-    # Check if user is owner of the business
-    if db_slot.service_id:
-        check_business_owner_permission(db_slot.service.business_id, current_user)
-    elif db_slot.resource_id:
-        check_business_owner_permission(db_slot.resource.business_id, current_user)
     
     update_data = slot_update.dict(exclude_unset=True)
     for key, value in update_data.items():
@@ -501,23 +462,26 @@ def update_availability_slot(
 @router.post("/blocked-times", response_model=BlockedTimeResponse)
 def create_blocked_time(
     blocked_time: BlockedTimeCreate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Create a new blocked time"""
-    # Check if user is owner of the business
+    # Check if business exists
     if blocked_time.business_id:
-        check_business_owner_permission(blocked_time.business_id, current_user)
-    elif blocked_time.service_id:
+        business = db.query(Business).filter(Business.business_id == blocked_time.business_id).first()
+        if not business:
+            raise HTTPException(status_code=404, detail="Business not found")
+    
+    # Check if service exists if provided
+    if blocked_time.service_id:
         service = db.query(Service).filter(Service.service_id == blocked_time.service_id).first()
-        if service is None:
+        if not service:
             raise HTTPException(status_code=404, detail="Service not found")
-        check_business_owner_permission(service.business_id, current_user)
-    elif blocked_time.resource_id:
+    
+    # Check if resource exists if provided
+    if blocked_time.resource_id:
         resource = db.query(Resource).filter(Resource.resource_id == blocked_time.resource_id).first()
-        if resource is None:
+        if not resource:
             raise HTTPException(status_code=404, detail="Resource not found")
-        check_business_owner_permission(resource.business_id, current_user)
     
     db_blocked_time = BlockedTime(**blocked_time.dict())
     db.add(db_blocked_time)
@@ -562,41 +526,12 @@ def read_blocked_times(
 def update_blocked_time(
     block_id: int,
     blocked_time_update: BlockedTimeUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Update a blocked time"""
     db_blocked_time = db.query(BlockedTime).filter(BlockedTime.block_id == block_id).first()
     if db_blocked_time is None:
         raise HTTPException(status_code=404, detail="Blocked time not found")
-    
-    # Check if user is owner of the business or the creator
-    is_creator = db_blocked_time.created_by == current_user.user_id
-    is_owner = False
-    
-    if db_blocked_time.business_id:
-        try:
-            check_business_owner_permission(db_blocked_time.business_id, current_user)
-            is_owner = True
-        except HTTPException:
-            pass
-    elif db_blocked_time.service_id:
-        try:
-            service = db.query(Service).filter(Service.service_id == db_blocked_time.service_id).first()
-            check_business_owner_permission(service.business_id, current_user)
-            is_owner = True
-        except HTTPException:
-            pass
-    elif db_blocked_time.resource_id:
-        try:
-            resource = db.query(Resource).filter(Resource.resource_id == db_blocked_time.resource_id).first()
-            check_business_owner_permission(resource.business_id, current_user)
-            is_owner = True
-        except HTTPException:
-            pass
-    
-    if not (is_creator or is_owner):
-        raise HTTPException(status_code=403, detail="Not authorized to update this blocked time")
     
     update_data = blocked_time_update.dict(exclude_unset=True)
     for key, value in update_data.items():
@@ -609,41 +544,12 @@ def update_blocked_time(
 @router.delete("/blocked-times/{block_id}")
 def delete_blocked_time(
     block_id: int,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Delete a blocked time"""
     db_blocked_time = db.query(BlockedTime).filter(BlockedTime.block_id == block_id).first()
     if db_blocked_time is None:
         raise HTTPException(status_code=404, detail="Blocked time not found")
-    
-    # Check if user is owner of the business or the creator
-    is_creator = db_blocked_time.created_by == current_user.user_id
-    is_owner = False
-    
-    if db_blocked_time.business_id:
-        try:
-            check_business_owner_permission(db_blocked_time.business_id, current_user)
-            is_owner = True
-        except HTTPException:
-            pass
-    elif db_blocked_time.service_id:
-        try:
-            service = db.query(Service).filter(Service.service_id == db_blocked_time.service_id).first()
-            check_business_owner_permission(service.business_id, current_user)
-            is_owner = True
-        except HTTPException:
-            pass
-    elif db_blocked_time.resource_id:
-        try:
-            resource = db.query(Resource).filter(Resource.resource_id == db_blocked_time.resource_id).first()
-            check_business_owner_permission(resource.business_id, current_user)
-            is_owner = True
-        except HTTPException:
-            pass
-    
-    if not (is_creator or is_owner):
-        raise HTTPException(status_code=403, detail="Not authorized to delete this blocked time")
     
     db.delete(db_blocked_time)
     db.commit()

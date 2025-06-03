@@ -11,7 +11,6 @@ from schemas.promotion_schemas import (
     PromotionValidationRequest, PromotionValidationResponse,
     PromotionStatusEnum, DiscountTypeEnum
 )
-from auth.auth import get_current_user, get_current_active_user, check_business_owner_permission
 
 router = APIRouter(
     prefix="/api/promotions",
@@ -23,13 +22,9 @@ router = APIRouter(
 @router.post("/", response_model=PromotionResponse)
 def create_promotion(
     promotion: PromotionCreate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Create a new promotion (for business owner)"""
-    # Check if current user is the business owner
-    check_business_owner_permission(promotion.business_id, current_user)
-    
+    """Create a new promotion"""
     # Check if code already exists
     existing_promotion = db.query(Promotion).filter(Promotion.code == promotion.code).first()
     if existing_promotion:
@@ -52,7 +47,7 @@ def create_promotion(
         applicable_services=promotion.applicable_services,
         applicable_days=promotion.applicable_days,
         status=promotion.status,
-        created_by=current_user.user_id
+        created_by=promotion.created_by
     )
     
     db.add(db_promotion)
@@ -68,10 +63,9 @@ def get_business_promotions(
     skip: int = 0,
     limit: int = 100,
     status: Optional[PromotionStatusEnum] = None,
-    current_user: User = Depends(check_business_owner_permission),
     db: Session = Depends(get_db)
 ):
-    """Get all promotions for a business (for business owner)"""
+    """Get all promotions for a business"""
     # Query promotions
     query = db.query(Promotion).filter(Promotion.business_id == business_id)
     
@@ -116,16 +110,12 @@ def get_active_business_promotions(
 @router.get("/{promotion_id}", response_model=PromotionResponse)
 def get_promotion(
     promotion_id: int,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Get a specific promotion"""
     promotion = db.query(Promotion).filter(Promotion.promotion_id == promotion_id).first()
     if not promotion:
         raise HTTPException(status_code=404, detail="Promotion not found")
-    
-    # Check if current user is the business owner
-    check_business_owner_permission(promotion.business_id, current_user)
     
     return promotion
 
@@ -134,16 +124,12 @@ def get_promotion(
 def update_promotion(
     promotion_id: int,
     promotion_update: PromotionUpdate,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Update a promotion (for business owner)"""
+    """Update a promotion"""
     db_promotion = db.query(Promotion).filter(Promotion.promotion_id == promotion_id).first()
     if not db_promotion:
         raise HTTPException(status_code=404, detail="Promotion not found")
-    
-    # Check if current user is the business owner
-    check_business_owner_permission(db_promotion.business_id, current_user)
     
     # Update promotion fields
     update_data = promotion_update.dict(exclude_unset=True)
@@ -161,16 +147,12 @@ def update_promotion(
 @router.delete("/{promotion_id}")
 def delete_promotion(
     promotion_id: int,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Delete a promotion (for business owner)"""
+    """Delete a promotion"""
     db_promotion = db.query(Promotion).filter(Promotion.promotion_id == promotion_id).first()
     if not db_promotion:
         raise HTTPException(status_code=404, detail="Promotion not found")
-    
-    # Check if current user is the business owner
-    check_business_owner_permission(db_promotion.business_id, current_user)
     
     # Check if promotion has been used
     usage_count = db.query(PromotionUsage).filter(PromotionUsage.promotion_id == promotion_id).count()
@@ -190,7 +172,6 @@ def delete_promotion(
 @router.post("/validate", response_model=PromotionValidationResponse)
 def validate_promotion(
     validation_request: PromotionValidationRequest,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Validate a promotion code"""
@@ -269,7 +250,6 @@ def validate_promotion(
 @router.post("/apply", response_model=PromotionUsageResponse)
 def apply_promotion(
     promotion_usage: PromotionUsageBase,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
     """Apply a promotion to a booking"""
@@ -278,14 +258,10 @@ def apply_promotion(
     if not promotion:
         raise HTTPException(status_code=404, detail="Promotion not found")
     
-    # Check if booking exists and belongs to the user
-    booking = db.query(Booking).filter(
-        Booking.booking_id == promotion_usage.booking_id,
-        Booking.user_id == current_user.user_id
-    ).first()
-    
+    # Check if booking exists
+    booking = db.query(Booking).filter(Booking.booking_id == promotion_usage.booking_id).first()
     if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found or doesn't belong to you")
+        raise HTTPException(status_code=404, detail="Booking not found")
     
     # Check if booking already has a promotion applied
     existing_usage = db.query(PromotionUsage).filter(
@@ -298,7 +274,7 @@ def apply_promotion(
     # Create promotion usage
     db_usage = PromotionUsage(
         promotion_id=promotion_usage.promotion_id,
-        user_id=current_user.user_id,
+        user_id=promotion_usage.user_id,
         booking_id=promotion_usage.booking_id,
         discount_amount=promotion_usage.discount_amount
     )
@@ -319,13 +295,9 @@ def get_business_promotion_usage(
     business_id: int,
     skip: int = 0,
     limit: int = 100,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Get promotion usage history for a business (for business owner)"""
-    # Check if current user is the business owner
-    check_business_owner_permission(business_id, current_user)
-    
+    """Get promotion usage history for a business"""
     # Get all promotions for the business
     promotions = db.query(Promotion).filter(Promotion.business_id == business_id).all()
     promotion_ids = [p.promotion_id for p in promotions]
@@ -338,16 +310,16 @@ def get_business_promotion_usage(
     return usages
 
 # Get promotion usage history for a user
-@router.get("/usage/user", response_model=List[PromotionUsageResponse])
+@router.get("/usage/user/{user_id}", response_model=List[PromotionUsageResponse])
 def get_user_promotion_usage(
+    user_id: int,
     skip: int = 0,
     limit: int = 100,
-    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Get promotion usage history for the current user"""
+    """Get promotion usage history for a user"""
     usages = db.query(PromotionUsage).filter(
-        PromotionUsage.user_id == current_user.user_id
+        PromotionUsage.user_id == user_id
     ).order_by(PromotionUsage.used_at.desc()).offset(skip).limit(limit).all()
     
     return usages 
